@@ -11,6 +11,7 @@ from typing import Callable, Sequence
 import json
 import requests
 import re
+import pandas as pd
 #----------------------------------------------
 # 1. Configuration
 
@@ -19,6 +20,7 @@ CITY_A = {"name": "Viana do Castelo", "latitude": 41.693, "longitude": -8.832}
 CITY_B = {"name": "Guarda", "latitude": 40.537, "longitude": -7.268}
 
 # historical period
+#to be confirmed
 START_DATE = "2024-01-01"
 END_DATE = "2025-12-31"
 TIMEZONE = "Europe/Lisbon"
@@ -31,11 +33,12 @@ FEATURES = [
     "wind_speed_10m",
 ]
 
-# target T6: strong rain or strong wind
+# target T6: (T1 or T5)strong rain or strong wind
 RAIN_THRESHOLD_MM = 0.1   # T1: y = 1 if precipitation >= 0.1 mm
 WIND_QUANTILE = 0.80      # T5: threshold = 0.80 quantile of wind in the pooled warm-up
 
 #warm-up fraction 
+#to be confirmed
 WARMUP_FRACTION = 0.25
 
 #default random seed from the template
@@ -57,11 +60,12 @@ FORCE_DOWNLOAD = False
 #----------------------------------------------
 #2. Data Acquisition
 
-# turn a label into a filename-friendly string
 def slugify(text: str) -> str:
+    """Turn a label into a filename-friendly string."""
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 def build_raw_filename(city_name: str, start_date: str, end_date: str) -> str:
+    """Create a stable name for the saved raw API response."""
     return f"open_meteo_{slugify(city_name)}_{start_date}_{end_date}.json"
 
 def build_open_meteo_params(
@@ -91,8 +95,8 @@ def ensure_output_directories(
     processed_dir.mkdir(parents=True, exist_ok=True)
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-# download one fixed historical period from Open-Meteo
 def download_open_meteo(city: dict) -> dict:
+    """Download one fixed historical period from Open-Meteo."""
     params = build_open_meteo_params(
         latitude=float(city["latitude"]),
         longitude=float(city["longitude"]),
@@ -108,8 +112,7 @@ def download_open_meteo(city: dict) -> dict:
         payload = response.json()
     except requests.RequestException as exc:
         raise RuntimeError(
-            "Could not download Open-Meteo data. Check the connection or reuse "
-            "a saved raw snapshot with FORCE_DOWNLOAD=False."
+            f"Open-Meteo request failed: {exc}"
         ) from exc
     except ValueError as exc:
         raise RuntimeError("Open-Meteo returned invalid JSON.") from exc
@@ -124,7 +127,6 @@ def load_or_download_raw(
     downloader: Callable[[], dict],
     force_download: bool = False,
 ) -> dict:
-    """COLLECT ONCE -> SAVE RAW DATA -> REPLAY MANY TIMES."""
     raw_path = Path(raw_path)
     if raw_path.exists() and not force_download:
         print(f"      Reusing raw snapshot: {raw_path.name}")
@@ -146,25 +148,76 @@ def load_city_payload(city: dict, raw_dir: Path = RAW_DIR) -> tuple[Path, dict]:
     )
     return raw_path, payload
 
-
-
-
-
-
-
-
-
-
-
-
 # ----------------------------------------------
+# Data Preparation
+
+def build_processed_filename(city_name: str, start_date: str, end_date: str) -> str:
+    """Create a stable name for the processed CSV file."""
+    return f"open_meteo_{slugify(city_name)}_{start_date}_{end_date}.csv"
+
+def prepare_city_frame(payload: dict, city_name: str, features: Sequence[str]) -> pd.DataFrame:
+    """Validate one Open-Meteo payload and return a chronological table."""
+    hourly = payload.get("hourly", {})
+    if "time" not in hourly:
+        raise ValueError("Open-Meteo payload is missing hourly.time")
+
+    missing = [feature for feature in features if feature not in hourly]
+    if missing:
+        raise ValueError(f"Open-Meteo payload is missing required features: {missing}")
+
+    data = {"timestamp": pd.to_datetime(hourly["time"], errors="coerce")}
+    for feature in features:
+        data[feature] = pd.to_numeric(pd.Series(hourly[feature]), errors="coerce")
+
+    df = pd.DataFrame(data)
+    df["city"] = city_name
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    return df[["timestamp", *features, "city"]]
+
+
+def check_data_quality(df: pd.DataFrame, features: Sequence[str]) -> None:
+    """Print the data quality evidence for one city."""
+    city = df["city"].iloc[0]
+    print(f"\nData quality - {city}")
+    print(f"  Rows: {len(df):,}")
+    print(f"  Period: {df['timestamp'].min()} -> {df['timestamp'].max()}")
+    print("  Missing values per column:")
+    print(df[["timestamp", *features]].isna().sum().to_string())
+    print(f"  Duplicated timestamps: {df['timestamp'].duplicated().sum()}")
+
+    steps = df["timestamp"].diff().dropna()
+    irregular = steps[steps != pd.Timedelta(hours=1)]
+    print(f"  Time steps different from 1 hour: {len(irregular)}")
+
+    humidity = df["relative_humidity_2m"]
+    print(f"  Humidity outside [0, 100]: {((humidity < 0) | (humidity > 100)).sum()}")
+    print(f"  Negative precipitation: {(df['precipitation'] < 0).sum()}")
+    print(f"  Negative wind speed: {(df['wind_speed_10m'] < 0).sum()}")
+    print("  Summary (extreme values are kept, not removed):")
+    print(df[list(features)].describe().round(2).to_string())
+
+
 def main() -> None:
     ensure_output_directories()
+
+    city_frames: dict[str, pd.DataFrame] = {}
     for city in (CITY_A, CITY_B):
         raw_path, payload = load_city_payload(city)
-        n_hours = len(payload["hourly"]["time"])
-        print(f"{city['name']}: {n_hours} hourly observations")
+        df = prepare_city_frame(payload, city["name"], FEATURES)
+        check_data_quality(df, FEATURES)
+
+        out_csv = PROCESSED_DIR / build_processed_filename(city["name"], START_DATE, END_DATE)
+        df.to_csv(out_csv, index=False)
+        print(f"  Saved: {out_csv.name}")
+        city_frames[city["name"]] = df
+
+    same_timestamps = city_frames[CITY_A["name"]]["timestamp"].equals(
+        city_frames[CITY_B["name"]]["timestamp"]
+    )
+    print(f"\nBoth cities share exactly the same timestamps: {same_timestamps}")
 
 
 if __name__ == "__main__":
     main()
+
+
