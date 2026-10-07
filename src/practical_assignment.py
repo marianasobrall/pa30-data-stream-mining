@@ -8,6 +8,8 @@ Business Scenario: Seasonal Outdoor Fair
 from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Sequence
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import json
 import requests
 import re
@@ -149,7 +151,7 @@ def load_city_payload(city: dict, raw_dir: Path = RAW_DIR) -> tuple[Path, dict]:
     return raw_path, payload
 
 # ----------------------------------------------
-# Data Preparation
+# 3. Data Preparation
 
 def build_processed_filename(city_name: str, start_date: str, end_date: str) -> str:
     """Create a stable name for the processed CSV file."""
@@ -197,6 +199,96 @@ def check_data_quality(df: pd.DataFrame, features: Sequence[str]) -> None:
     print(df[list(features)].describe().round(2).to_string())
 
 
+#----------------------------------------------
+# 4.1 City A - Viana do Castelo
+
+
+
+# ----------------------------------------------
+# 4. Stream profile (each block: one student, one primary city)
+
+# 4.1 City A - Viana do Castelo
+
+# rolling window used only to make the hourly series readable (7 days)
+ROLLING_WINDOW_HOURS = 24 * 7
+
+
+def _save_figure(path: Path) -> Path:
+    """Save the current matplotlib figure and close it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(path, dpi=160, bbox_inches="tight")
+    plt.close()
+    return path
+
+
+def plot_temporal_profile(
+    df: pd.DataFrame,
+    features: Sequence[str] = FEATURES,
+    window: int = ROLLING_WINDOW_HOURS,
+    figures_dir: Path = FIGURES_DIR,
+) -> Path:
+    """Plot each weather variable over time with a rolling mean for one city."""
+    city = df["city"].iloc[0]
+    fig, axes = plt.subplots(len(features), 1, figsize=(12, 10), sharex=True)
+
+    for ax, feature in zip(axes, features):
+        ax.plot(df["timestamp"], df[feature], linewidth=0.5, alpha=0.4, label="Hourly")
+        ax.plot(
+            df["timestamp"],
+            df[feature].rolling(window).mean(),
+            linewidth=1.6,
+            label=f"{window // 24}-day rolling mean",
+        )
+        ax.set_ylabel(feature)
+        ax.grid(alpha=0.2)
+
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+        ax.tick_params(axis="x", labelbottom=True, labelrotation=90, labelsize=7)
+    fig.autofmt_xdate()
+    return _save_figure(figures_dir / f"{slugify(city)}_temporal_profile.png")
+
+
+
+
+#4.2 City B - Guarda
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def main() -> None:
     ensure_output_directories()
 
@@ -211,6 +303,13 @@ def main() -> None:
         print(f"  Saved: {out_csv.name}")
         city_frames[city["name"]] = df
 
+    # (City A - Viana do Castelo) 
+    fig_path = plot_temporal_profile(city_frames[CITY_A["name"]])
+    print(f"Figure saved: {fig_path.name}")
+
+    # (City B - Guarda) 
+
+
     same_timestamps = city_frames[CITY_A["name"]]["timestamp"].equals(
         city_frames[CITY_B["name"]]["timestamp"]
     )
@@ -219,5 +318,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
