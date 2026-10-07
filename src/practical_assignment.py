@@ -195,32 +195,22 @@ def check_data_quality(df: pd.DataFrame, features: Sequence[str]) -> None:
     print(f"  Humidity outside [0, 100]: {((humidity < 0) | (humidity > 100)).sum()}")
     print(f"  Negative precipitation: {(df['precipitation'] < 0).sum()}")
     print(f"  Negative wind speed: {(df['wind_speed_10m'] < 0).sum()}")
-    print("  Summary (extreme values are kept, not removed):")
+    print("  Summary:")
     print(df[list(features)].describe().round(2).to_string())
 
+#---------
+# 4. Stream profile for both cities
 
-#----------------------------------------------
-# 4.1 City A - Viana do Castelo
-
-
-
-# ----------------------------------------------
-# 4. Stream profile (each block: one student, one primary city)
-
-# 4.1 City A - Viana do Castelo
-
-# rolling window used only to make the hourly series readable (7 days)
+# 7 day rolling window - make the hourly series readable
 ROLLING_WINDOW_HOURS = 24 * 7
 
-
 def _save_figure(path: Path) -> Path:
-    """Save the current matplotlib figure and close it."""
+    """Save the matplotlib figure"""
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
     plt.savefig(path, dpi=160, bbox_inches="tight")
     plt.close()
     return path
-
 
 def plot_temporal_profile(
     df: pd.DataFrame,
@@ -228,7 +218,7 @@ def plot_temporal_profile(
     window: int = ROLLING_WINDOW_HOURS,
     figures_dir: Path = FIGURES_DIR,
 ) -> Path:
-    """Plot each weather variable over time with a rolling mean for one city."""
+    """Plot each weather variable over time with a rolling mean for city A."""
     city = df["city"].iloc[0]
     fig, axes = plt.subplots(len(features), 1, figsize=(12, 10), sharex=True)
 
@@ -242,46 +232,64 @@ def plot_temporal_profile(
         )
         ax.set_ylabel(feature)
         ax.grid(alpha=0.2)
-
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
         ax.tick_params(axis="x", labelbottom=True, labelrotation=90, labelsize=7)
-    fig.autofmt_xdate()
+
+    axes[0].set_title(f"{city} - weather variables over time (°C, %, mm, km/h)")
+    axes[0].legend(loc="best")
+    axes[-1].set_xlabel("Time")
     return _save_figure(figures_dir / f"{slugify(city)}_temporal_profile.png")
 
+# descriptive statistics 
+def summarise_city(
+    df: pd.DataFrame,
+    features: Sequence[str] = FEATURES,
+    results_dir: Path = RESULTS_DIR,
+) -> pd.DataFrame:
+    """Descriptive statistics and timestamps of the extremes for city A."""
+    city = df["city"].iloc[0]
+    summary = df[list(features)].describe().T.round(2)
+    summary["min_at"] = [df.loc[df[f].idxmin(), "timestamp"] for f in features]
+    summary["max_at"] = [df.loc[df[f].idxmax(), "timestamp"] for f in features]
+
+    rainy_hours = int((df["precipitation"] >= RAIN_THRESHOLD_MM).sum())
+    print(f"\nDescriptive summary - {city}")
+    print(summary.to_string())
+    print(
+        f"  Hours with precipitation >= {RAIN_THRESHOLD_MM} mm: "
+        f"{rainy_hours:,} ({rainy_hours / len(df):.1%})"
+    )
+
+    results_dir.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(results_dir / f"{slugify(city)}_summary.csv")
+    return summary
 
 
+def top_extremes(df: pd.DataFrame, feature: str, n: int = 5) -> pd.DataFrame:
+    """Return the n highest hourly values of one variable, with timestamps."""
+    return df.nlargest(n, feature)[["timestamp", feature]]
 
-#4.2 City B - Guarda
+def plot_hourly_profile(df: pd.DataFrame, figures_dir: Path = FIGURES_DIR) -> Path:
+    """Plot the share of rainy hours and the mean wind speed by hour of day."""
+    city = df["city"].iloc[0]
+    hours = df["timestamp"].dt.hour
 
+    #group the hours into 24 groups and calculate the share of hours with rain and the mean wind speed
+    rain_share = (df["precipitation"] >= RAIN_THRESHOLD_MM).groupby(hours).mean()
+    wind_mean = df["wind_speed_10m"].groupby(hours).mean()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    axes[0].bar(rain_share.index, rain_share.values)
+    axes[0].set_ylabel(f"Share of hours with rain (>= {RAIN_THRESHOLD_MM} mm)")
+    axes[0].set_title(f"{city} - hour-of-day profile")
+    axes[1].plot(wind_mean.index, wind_mean.values, marker="o")
+    axes[1].set_ylabel("Mean wind speed (km/h)")
+    axes[1].set_xlabel("Hour of day (local time)")
+    axes[1].set_xticks(range(24))
+    for ax in axes:
+        ax.grid(alpha=0.2)
+    return _save_figure(figures_dir / f"{slugify(city)}_hourly_profile.png")
 
 
 
@@ -303,11 +311,15 @@ def main() -> None:
         print(f"  Saved: {out_csv.name}")
         city_frames[city["name"]] = df
 
-    # (City A - Viana do Castelo) 
-    fig_path = plot_temporal_profile(city_frames[CITY_A["name"]])
-    print(f"Figure saved: {fig_path.name}")
-
-    # (City B - Guarda) 
+       
+    for city in (CITY_A, CITY_B):
+        df = city_frames[city["name"]]
+        fig_path = plot_temporal_profile(df)
+        print(f"Figure saved: {fig_path.name}")
+        summarise_city(df)
+        for feature in ("wind_speed_10m", "precipitation"):
+            print(f"\nTop 5 hourly values - {city['name']} - {feature}")
+            print(top_extremes(df, feature).to_string(index=False))
 
 
     same_timestamps = city_frames[CITY_A["name"]]["timestamp"].equals(
