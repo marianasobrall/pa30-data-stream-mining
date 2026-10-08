@@ -236,7 +236,7 @@ def plot_temporal_profile(
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
         ax.tick_params(axis="x", labelbottom=True, labelrotation=90, labelsize=7)
 
-    axes[0].set_title(f"{city} - weather variables over time (°C, %, mm, km/h)")
+    axes[0].set_title(f"{city} - Weather variables over time (°C, %, mm, km/h)")
     axes[0].legend(loc="best")
     axes[-1].set_xlabel("Time")
     return _save_figure(figures_dir / f"{slugify(city)}_temporal_profile.png")
@@ -291,7 +291,31 @@ def plot_hourly_profile(df: pd.DataFrame, figures_dir: Path = FIGURES_DIR) -> Pa
         ax.grid(alpha=0.2)
     return _save_figure(figures_dir / f"{slugify(city)}_hourly_profile.png")
 
+def plot_rolling_behaviour(
+    df: pd.DataFrame,
+    window: int = ROLLING_WINDOW_HOURS,
+    figures_dir: Path = FIGURES_DIR,
+) -> Path:
+    """Plot rolling variability of wind and rolling share of rainy hours."""
+    city = df["city"].iloc[0]
+    wind = df["wind_speed_10m"]
+    rainy = (df["precipitation"] >= RAIN_THRESHOLD_MM).astype(float)
 
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+    axes[0].plot(df["timestamp"], wind.rolling(window).mean(), label="Rolling mean")
+    axes[0].plot(df["timestamp"], wind.rolling(window).std(), label="Rolling std")
+    axes[0].set_ylabel("Wind speed (km/h)")
+    axes[0].set_title(f"{city} - {window // 24}-day rolling behaviour")
+    axes[0].legend(loc="best")
+    axes[1].plot(df["timestamp"], rainy.rolling(window).mean())
+    axes[1].set_ylabel(f"Share of rainy hours (>= {RAIN_THRESHOLD_MM} mm)")
+    axes[1].set_xlabel("Time")
+    for ax in axes:
+        ax.grid(alpha=0.2)
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+        ax.tick_params(axis="x", labelbottom=True, labelrotation=90, labelsize=7)
+    return _save_figure(figures_dir / f"{slugify(city)}_rolling_behaviour.png")
 
 
 
@@ -320,6 +344,11 @@ def main() -> None:
         for feature in ("wind_speed_10m", "precipitation"):
             print(f"\nTop 5 hourly values - {city['name']} - {feature}")
             print(top_extremes(df, feature).to_string(index=False))
+
+        hourly_path = plot_hourly_profile(df)
+        print(f"Figure saved: {hourly_path.name}")
+        rolling_path = plot_rolling_behaviour(df)
+        print(f"Figure saved: {rolling_path.name}")
 
 
     same_timestamps = city_frames[CITY_A["name"]]["timestamp"].equals(
