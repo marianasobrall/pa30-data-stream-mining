@@ -14,6 +14,7 @@ import json
 import requests
 import re
 import pandas as pd
+
 #----------------------------------------------
 # 1. Configuration
 
@@ -22,7 +23,6 @@ CITY_A = {"name": "Viana do Castelo", "latitude": 41.693, "longitude": -8.832}
 CITY_B = {"name": "Guarda", "latitude": 40.537, "longitude": -7.268}
 
 # historical period
-#to be confirmed
 START_DATE = "2024-01-01"
 END_DATE = "2025-12-31"
 TIMEZONE = "Europe/Lisbon"
@@ -40,8 +40,11 @@ RAIN_THRESHOLD_MM = 0.1   # T1: y = 1 if precipitation >= 0.1 mm
 WIND_QUANTILE = 0.80      # T5: threshold = 0.80 quantile of wind in the pooled warm-up
 
 #warm-up fraction 
-#to be confirmed
 WARMUP_FRACTION = 0.25
+
+# feature windows (hours)
+WINDOW_SHORT = 6
+WINDOW_LONG = 24
 
 #default random seed from the template
 RANDOM_SEED = 42
@@ -67,7 +70,6 @@ def slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 def build_raw_filename(city_name: str, start_date: str, end_date: str) -> str:
-    """Create a stable name for the saved raw API response."""
     return f"open_meteo_{slugify(city_name)}_{start_date}_{end_date}.json"
 
 def build_open_meteo_params(
@@ -86,7 +88,6 @@ def build_open_meteo_params(
         "hourly": ",".join(hourly_variables),
         "timezone": timezone,
     }
-
 
 def ensure_output_directories(
     raw_dir: Path = RAW_DIR,
@@ -129,6 +130,7 @@ def load_or_download_raw(
     downloader: Callable[[], dict],
     force_download: bool = False,
 ) -> dict:
+    """COLLECT ONCE -> SAVE RAW DATA -> REPLAY MANY TIMES."""
     raw_path = Path(raw_path)
     if raw_path.exists() and not force_download:
         print(f"      Reusing raw snapshot: {raw_path.name}")
@@ -154,7 +156,6 @@ def load_city_payload(city: dict, raw_dir: Path = RAW_DIR) -> tuple[Path, dict]:
 # 3. Data Preparation
 
 def build_processed_filename(city_name: str, start_date: str, end_date: str) -> str:
-    """Create a stable name for the processed CSV file."""
     return f"open_meteo_{slugify(city_name)}_{start_date}_{end_date}.csv"
 
 def prepare_city_frame(payload: dict, city_name: str, features: Sequence[str]) -> pd.DataFrame:
@@ -178,7 +179,7 @@ def prepare_city_frame(payload: dict, city_name: str, features: Sequence[str]) -
 
 
 def check_data_quality(df: pd.DataFrame, features: Sequence[str]) -> None:
-    """Print the data quality evidence for one city."""
+    """Print the data quality evidence."""
     city = df["city"].iloc[0]
     print(f"\nData quality - {city}")
     print(f"  Rows: {len(df):,}")
@@ -195,17 +196,14 @@ def check_data_quality(df: pd.DataFrame, features: Sequence[str]) -> None:
     print(f"  Humidity outside [0, 100]: {((humidity < 0) | (humidity > 100)).sum()}")
     print(f"  Negative precipitation: {(df['precipitation'] < 0).sum()}")
     print(f"  Negative wind speed: {(df['wind_speed_10m'] < 0).sum()}")
-    print("  Summary:")
-    print(df[list(features)].describe().round(2).to_string())
 
-#---------
+#------------------------------------
 # 4. Stream profile for both cities
 
 # 7 day rolling window - make the hourly series readable
 ROLLING_WINDOW_HOURS = 24 * 7
 
 def _save_figure(path: Path) -> Path:
-    """Save the matplotlib figure"""
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
     plt.savefig(path, dpi=160, bbox_inches="tight")
@@ -218,7 +216,7 @@ def plot_temporal_profile(
     window: int = ROLLING_WINDOW_HOURS,
     figures_dir: Path = FIGURES_DIR,
 ) -> Path:
-    """Plot each weather variable over time with a rolling mean for city A."""
+    """Plot each weather variable over time with a rolling mean."""
     city = df["city"].iloc[0]
     fig, axes = plt.subplots(len(features), 1, figsize=(12, 10), sharex=True)
 
@@ -247,7 +245,7 @@ def summarise_city(
     features: Sequence[str] = FEATURES,
     results_dir: Path = RESULTS_DIR,
 ) -> pd.DataFrame:
-    """Descriptive statistics and timestamps of the extremes for city A."""
+    """Descriptive statistics and timestamps of the extremes."""
     city = df["city"].iloc[0]
     summary = df[list(features)].describe().T.round(2)
     summary["min_at"] = [df.loc[df[f].idxmin(), "timestamp"] for f in features]
@@ -267,7 +265,7 @@ def summarise_city(
 
 
 def top_extremes(df: pd.DataFrame, feature: str, n: int = 5) -> pd.DataFrame:
-    """Return the n highest hourly values of one variable, with timestamps."""
+    """Return the n highest hourly values of one variable."""
     return df.nlargest(n, feature)[["timestamp", feature]]
 
 def plot_hourly_profile(df: pd.DataFrame, figures_dir: Path = FIGURES_DIR) -> Path:
@@ -296,7 +294,7 @@ def plot_rolling_behaviour(
     window: int = ROLLING_WINDOW_HOURS,
     figures_dir: Path = FIGURES_DIR,
 ) -> Path:
-    """Plot rolling variability of wind and rolling share of rainy hours."""
+    """Plot rolling variability of wind and rolling share of rainy hours"""
     city = df["city"].iloc[0]
     wind = df["wind_speed_10m"]
     rainy = (df["precipitation"] >= RAIN_THRESHOLD_MM).astype(float)
@@ -317,13 +315,84 @@ def plot_rolling_behaviour(
         ax.tick_params(axis="x", labelbottom=True, labelrotation=90, labelsize=7)
     return _save_figure(figures_dir / f"{slugify(city)}_rolling_behaviour.png")
 
+#---------------------------------------
+#5. Warm-up and target T6
+
+def get_warmup_end(city_frames: dict[str, pd.DataFrame], warmup_fraction: float) -> pd.Timestamp:
+    """Last timestamp of the warm-up, shared by both cities"""
+    timestamps = sorted(pd.concat([f["timestamp"] for f in city_frames.values()]).unique())
+    n_train_timestamps = int(len(timestamps) * warmup_fraction)
+    n_train_timestamps = max(1, min(len(timestamps) - 1, n_train_timestamps))
+    return pd.Timestamp(timestamps[n_train_timestamps - 1])
+
+def compute_wind_threshold(
+    city_frames: dict[str, pd.DataFrame],
+    warmup_end: pd.Timestamp,
+    quantile: float,
+) -> float:
+    """Wind speed quantile over the pooled warm-up of both cities."""
+    pooled = pd.concat(
+        [f.loc[f["timestamp"] <= warmup_end, "wind_speed_10m"] for f in city_frames.values()]
+    )
+    return float(pooled.quantile(quantile))
 
 
+def add_target_t6(df: pd.DataFrame, wind_threshold: float) -> pd.DataFrame:
+    """Add T6 target: rain (T1) or strong wind (T5)"""
+    df = df.copy()
+    df["rain_event"] = (df["precipitation"] >= RAIN_THRESHOLD_MM).astype(int)
+    df["wind_event"] = (df["wind_speed_10m"] >= wind_threshold).astype(int)
+    df["y"] = df["rain_event"] | df["wind_event"]
+    return df
+
+
+def report_target_frequency(df: pd.DataFrame, warmup_end: pd.Timestamp) -> None:
+    """Report of share of rain, strong wind and T6 hours in warm-up and evaluation"""
+    city = df["city"].iloc[0]
+    in_warmup = df["timestamp"] <= warmup_end
+    print(f"\nTarget frequency - {city}")
+    for label, mask in (("Warm-up", in_warmup), ("Evaluation", ~in_warmup)):
+        part = df[mask]
+        print(
+            f"  {label}: {len(part):,} hours | rain {part['rain_event'].mean():.1%} "
+            f"| strong wind {part['wind_event'].mean():.1%} | T6 {part['y'].mean():.1%}"
+        )
+
+
+# 6. Features (past info only)
+
+# Representation A: previous-state features (t-1)
+FEATURES_A = [f"{f}_lag1" for f in FEATURES]
+# Representation B: A + recent temporal context (all windows end at t-1)
+FEATURES_B = FEATURES_A + [
+    "temperature_delta",
+    "temperature_mean_6h",
+    "wind_std_6h",
+    "rain_hours_24h",
+]
+
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for feature in FEATURES:
+        df[f"{feature}_lag1"] = df[feature].shift(1)
+
+    temperature = df["temperature_2m"].shift(1)
+    df["temperature_delta"] = temperature - df["temperature_2m"].shift(2)
+    df["temperature_mean_6h"] = temperature.rolling(WINDOW_SHORT).mean()
+    df["wind_std_6h"] = df["wind_speed_10m"].shift(1).rolling(WINDOW_SHORT).std()
+    df["rain_hours_24h"] = df["rain_event"].shift(1).rolling(WINDOW_LONG).sum()
+    return df
+
+
+def verify_features(df: pd.DataFrame, i: int = 100) -> None:
+    past = df["temperature_2m"].iloc[i - WINDOW_SHORT : i]
+    assert df["temperature_2m_lag1"].iloc[i] == df["temperature_2m"].iloc[i - 1]
+    assert abs(df["temperature_mean_6h"].iloc[i] - past.mean()) < 1e-9
+    assert df["rain_hours_24h"].iloc[i] == df["rain_event"].iloc[i - WINDOW_LONG : i].sum()
 
 
 def main() -> None:
     ensure_output_directories()
-
     city_frames: dict[str, pd.DataFrame] = {}
     for city in (CITY_A, CITY_B):
         raw_path, payload = load_city_payload(city)
@@ -335,28 +404,44 @@ def main() -> None:
         print(f"  Saved: {out_csv.name}")
         city_frames[city["name"]] = df
 
-       
+    same_timestamps = city_frames[CITY_A["name"]]["timestamp"].equals(
+        city_frames[CITY_B["name"]]["timestamp"]
+    )
+    print(f"\nBoth cities share the same timestamps: {same_timestamps}")
+
+    warmup_end = get_warmup_end(city_frames, WARMUP_FRACTION)
+    wind_threshold = compute_wind_threshold(city_frames, warmup_end, WIND_QUANTILE)
+    print(f"Warm-up ends at: {warmup_end}")
+    print(f"Wind threshold (frozen, quantile {WIND_QUANTILE}): {wind_threshold:.2f} km/h")
+
+    for name in city_frames:
+        city_frames[name] = add_target_t6(city_frames[name], wind_threshold)
+        report_target_frequency(city_frames[name], warmup_end)
+
+
+    model_frames: dict[str, pd.DataFrame] = {}
+    for name in city_frames:
+        featured = add_features(city_frames[name])
+        model_frames[name] = featured.dropna(subset=FEATURES_B)
+        verify_features(model_frames[name])
+        print(f"{name}: {len(model_frames[name]):,} rows with complete features "
+              f"({len(featured) - len(model_frames[name])} initial rows dropped)")
+        
+
     for city in (CITY_A, CITY_B):
         df = city_frames[city["name"]]
-        fig_path = plot_temporal_profile(df)
-        print(f"Figure saved: {fig_path.name}")
         summarise_city(df)
         for feature in ("wind_speed_10m", "precipitation"):
             print(f"\nTop 5 hourly values - {city['name']} - {feature}")
             print(top_extremes(df, feature).to_string(index=False))
 
-        hourly_path = plot_hourly_profile(df)
-        print(f"Figure saved: {hourly_path.name}")
-        rolling_path = plot_rolling_behaviour(df)
-        print(f"Figure saved: {rolling_path.name}")
-
-
-    same_timestamps = city_frames[CITY_A["name"]]["timestamp"].equals(
-        city_frames[CITY_B["name"]]["timestamp"]
-    )
-    print(f"\nBoth cities share exactly the same timestamps: {same_timestamps}")
+        figures = [
+            plot_temporal_profile(df),
+            plot_hourly_profile(df),
+            plot_rolling_behaviour(df),
+        ]
+        print(f"  Figures saved: {', '.join(path.name for path in figures)}")
 
 
 if __name__ == "__main__":
     main()
-
