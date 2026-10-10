@@ -14,6 +14,12 @@ import json
 import requests
 import re
 import pandas as pd
+import numpy as np
+import sys
+import time
+import importlib.metadata as importlib_metadata
+from sklearn.preprocessing import MinMaxScaler
+from river import ensemble, forest, linear_model, naive_bayes, optim, tree
 
 #----------------------------------------------
 # 1. Configuration
@@ -48,6 +54,16 @@ WINDOW_LONG = 24
 
 #default random seed from the template
 RANDOM_SEED = 42
+
+# model parameters 
+HOEFFDING_GRACE_PERIOD = 50
+HOEFFDING_DELTA = 1e-3
+HOEFFDING_TAU = 0.10
+
+ENSEMBLE_SIZE = 5
+ENSEMBLE_GRACE_PERIOD = 30
+ENSEMBLE_DELTA = 1e-3
+ENSEMBLE_TAU = 0.10
 
 # setup directories
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -358,7 +374,7 @@ def report_target_frequency(df: pd.DataFrame, warmup_end: pd.Timestamp) -> None:
             f"| strong wind {part['wind_event'].mean():.1%} | T6 {part['y'].mean():.1%}"
         )
 
-
+#---------------------------------------
 # 6. Features (past info only)
 
 # Representation A: previous-state features (t-1)
@@ -390,9 +406,212 @@ def verify_features(df: pd.DataFrame, i: int = 100) -> None:
     assert abs(df["temperature_mean_6h"].iloc[i] - past.mean()) < 1e-9
     assert df["rain_hours_24h"].iloc[i] == df["rain_event"].iloc[i - WINDOW_LONG : i].sum()
 
+#---------------------------------
+#7. Models
 
+def build_city_events(df: pd.DataFrame, feature_names: Sequence[str]) -> list[dict]:
+    """Turn one city table into chronological events (x = features, y = T6)."""
+    return [
+        {
+            "timestamp": row.timestamp,
+            "x": {f: float(getattr(row, f)) for f in feature_names},
+            "y": int(row.y),
+        }
+        for row in df.sort_values("timestamp").itertuples(index=False)
+    ]
+
+def split_events(events: Sequence[dict], warmup_end: pd.Timestamp) -> tuple[list[dict], list[dict]]:
+    warm = [e for e in events if e["timestamp"] <= warmup_end]
+    evaluation = [e for e in events if e["timestamp"] > warmup_end]
+    return warm, evaluation
+
+
+def fit_shared_scaler(warm_events: Sequence[dict], feature_names: Sequence[str]) -> MinMaxScaler:
+    X = np.asarray([[e["x"][f] for f in feature_names] for e in warm_events], dtype=float)
+    return MinMaxScaler(feature_range=(0.0, 1.0), clip=True).fit(X)
+
+
+def transform_events(events: Sequence[dict], scaler: MinMaxScaler, feature_names: Sequence[str]) -> list[dict]:
+    names = list(feature_names)
+    X = np.asarray([[e["x"][f] for f in names] for e in events], dtype=float)
+    Xt = scaler.transform(X)
+    return [
+        {
+            "timestamp": e["timestamp"],
+            "x": {f"x{i}": float(row[i]) for i in range(len(names))},
+            "y": int(e["y"]),
+        }
+        for e, row in zip(events, Xt)
+    ]
+
+
+def _river_base_tree() -> tree.HoeffdingTreeClassifier:
+    return tree.HoeffdingTreeClassifier(
+        grace_period=ENSEMBLE_GRACE_PERIOD,
+        delta=ENSEMBLE_DELTA,
+        tau=ENSEMBLE_TAU,
+        leaf_prediction="mc",
+    )
+
+
+def make_models(seed: int = RANDOM_SEED) -> dict:
+    return {
+        "Gaussian Naive Bayes": naive_bayes.GaussianNB(),
+        "Online Logistic Regression": linear_model.LogisticRegression(optimizer=optim.SGD(0.05)),
+        "Hoeffding Tree": tree.HoeffdingTreeClassifier(
+            grace_period=HOEFFDING_GRACE_PERIOD,
+            delta=HOEFFDING_DELTA,
+            tau=HOEFFDING_TAU,
+            leaf_prediction="mc",
+        ),
+        "Online Bagging": ensemble.BaggingClassifier(
+            model=_river_base_tree(), n_models=ENSEMBLE_SIZE, seed=seed
+        ),
+        "Adaptive Random Forest": forest.ARFClassifier(
+            n_models=ENSEMBLE_SIZE,
+            max_features="sqrt",
+            lambda_value=6,
+            leaf_prediction="mc",
+            grace_period=ENSEMBLE_GRACE_PERIOD,
+            delta=ENSEMBLE_DELTA,
+            tau=ENSEMBLE_TAU,
+            seed=seed,
+        ),
+    }
+
+#----------------------------------------------
+# 8. Prequential evaluation (PREDICT -> EVALUATE -> LEARN)
+
+def _metrics_from_counts(tp, tn, fp, fn):
+    total = tp + tn + fp + fn
+    accuracy = (tp + tn) / total if total else 0.0
+    p1 = tp / (tp + fp) if (tp + fp) else 0.0
+    r1 = tp / (tp + fn) if (tp + fn) else 0.0
+    f1_1 = 2 * p1 * r1 / (p1 + r1) if (p1 + r1) else 0.0
+    p0 = tn / (tn + fn) if (tn + fn) else 0.0
+    r0 = tn / (tn + fp) if (tn + fp) else 0.0
+    f1_0 = 2 * p0 * r0 / (p0 + r0) if (p0 + r0) else 0.0
+    return float(accuracy), float((f1_0 + f1_1) / 2)
+
+
+class StreamingBinaryEvaluator:
+    """Incremental confusion matrix; the positive class (1) is the T6 event."""
+
+    def __init__(self):
+        self.tp = self.tn = self.fp = self.fn = 0
+        self.cold_starts = 0
+
+    def update(self, y_true: int, y_pred: int | None) -> None:
+        if y_pred is None:
+            self.cold_starts += 1
+            return
+        y_true, y_pred = int(y_true), int(y_pred)
+        if y_true == 1 and y_pred == 1: self.tp += 1
+        elif y_true == 0 and y_pred == 0: self.tn += 1
+        elif y_true == 0 and y_pred == 1: self.fp += 1
+        elif y_true == 1 and y_pred == 0: self.fn += 1
+
+    def summary(self) -> dict:
+        accuracy, macro_f1 = _metrics_from_counts(self.tp, self.tn, self.fp, self.fn)
+        precision = self.tp / (self.tp + self.fp) if (self.tp + self.fp) else 0.0
+        recall = self.tp / (self.tp + self.fn) if (self.tp + self.fn) else 0.0
+        return {
+            "accuracy": accuracy,
+            "macro_f1": macro_f1,
+            "precision": precision,
+            "recall": recall,
+            "tn": self.tn, "fp": self.fp, "fn": self.fn, "tp": self.tp,
+            "evaluated": self.tp + self.tn + self.fp + self.fn,
+            "cold_starts": self.cold_starts,
+        }
+
+
+def warm_up_model(model, events):
+    """Learn the shared warm-up without scoring it."""
+    for event in events:
+        model.learn_one(event["x"], event["y"])
+    return model
+
+
+def run_prequential(events, model) -> dict:
+    """Run one model over the evaluation stream: predict, evaluate, then learn."""
+    evaluator = StreamingBinaryEvaluator()
+    prediction_seconds = update_seconds = 0.0
+    for event in events:
+        t0 = time.perf_counter()
+        y_pred = model.predict_one(event["x"])            # 1) PREDICT
+        prediction_seconds += time.perf_counter() - t0
+        evaluator.update(event["y"], y_pred)              # 2) EVALUATE BEFORE LEARN
+        t1 = time.perf_counter()
+        model.learn_one(event["x"], event["y"])           # 3) LEARN
+        update_seconds += time.perf_counter() - t1
+    summary = evaluator.summary()
+    n_events = max(1, len(events))
+    summary["prediction_ms/event"] = 1000 * prediction_seconds / n_events
+    summary["update_ms/event"] = 1000 * update_seconds / n_events
+    return summary
+
+
+def package_version(name: str) -> str:
+    try:
+        return importlib_metadata.version(name)
+    except importlib_metadata.PackageNotFoundError:
+        return "not installed"
+
+
+def save_configuration(wind_threshold: float, warmup_end: pd.Timestamp, results_dir: Path = RESULTS_DIR) -> None:
+    """Save every parameter needed to reproduce the experiment."""
+    config = {
+        "assignment": "PA30 (T6)",
+        "city_a": CITY_A["name"],
+        "city_b": CITY_B["name"],
+        "period": f"{START_DATE} to {END_DATE}",
+        "timezone": TIMEZONE,
+        "warmup_fraction": WARMUP_FRACTION,
+        "warmup_end": str(warmup_end),
+        "rain_threshold_mm": RAIN_THRESHOLD_MM,
+        "wind_quantile": WIND_QUANTILE,
+        "wind_threshold_kmh": round(wind_threshold, 4),
+        "window_short_h": WINDOW_SHORT,
+        "window_long_h": WINDOW_LONG,
+        "random_seed": RANDOM_SEED,
+        "hoeffding_grace_period": HOEFFDING_GRACE_PERIOD,
+        "hoeffding_delta": HOEFFDING_DELTA,
+        "hoeffding_tau": HOEFFDING_TAU,
+        "ensemble_size": ENSEMBLE_SIZE,
+        "ensemble_grace_period": ENSEMBLE_GRACE_PERIOD,
+        "ensemble_delta": ENSEMBLE_DELTA,
+        "ensemble_tau": ENSEMBLE_TAU,
+        "python": sys.version.split()[0],
+    }
+    for package in ("river", "scikit-learn", "pandas", "numpy", "matplotlib", "requests"):
+        config[f"{package}_version"] = package_version(package)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(list(config.items()), columns=["parameter", "value"]).to_csv(
+        results_dir / "configurations.csv", index=False
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#main function
 def main() -> None:
     ensure_output_directories()
+
     city_frames: dict[str, pd.DataFrame] = {}
     for city in (CITY_A, CITY_B):
         raw_path, payload = load_city_payload(city)
@@ -410,6 +629,7 @@ def main() -> None:
     print(f"\nBoth cities share the same timestamps: {same_timestamps}")
 
     warmup_end = get_warmup_end(city_frames, WARMUP_FRACTION)
+    # threshold from the pooled warm-up only, then frozen
     wind_threshold = compute_wind_threshold(city_frames, warmup_end, WIND_QUANTILE)
     print(f"Warm-up ends at: {warmup_end}")
     print(f"Wind threshold (frozen, quantile {WIND_QUANTILE}): {wind_threshold:.2f} km/h")
@@ -418,15 +638,44 @@ def main() -> None:
         city_frames[name] = add_target_t6(city_frames[name], wind_threshold)
         report_target_frequency(city_frames[name], warmup_end)
 
-
     model_frames: dict[str, pd.DataFrame] = {}
     for name in city_frames:
         featured = add_features(city_frames[name])
+        # the first 24 rows have no complete past, so they are dropped
         model_frames[name] = featured.dropna(subset=FEATURES_B)
         verify_features(model_frames[name])
-        print(f"{name}: {len(model_frames[name]):,} rows with complete features "
-              f"({len(featured) - len(model_frames[name])} initial rows dropped)")
-        
+        print(
+            f"{name}: {len(model_frames[name]):,} rows with complete features "
+            f"({len(featured) - len(model_frames[name])} initial rows dropped)"
+        )
+
+    representations = {"A": FEATURES_A, "B": FEATURES_B}
+    results = []
+    for name, frame in model_frames.items():
+        for rep, cols in representations.items():
+            events = build_city_events(frame, cols)
+            warm, evaluation = split_events(events, warmup_end)
+            # scaler fitted on the warm-up only, then applied to everything
+            scaler = fit_shared_scaler(warm, cols)
+            warm_t = transform_events(warm, scaler, cols)
+            evaluation_t = transform_events(evaluation, scaler, cols)
+
+            # fresh models for every city and representation
+            for model_name, model in make_models().items():
+                warm_up_model(model, warm_t)
+                summary = run_prequential(evaluation_t, model)
+                results.append({"city": name, "representation": rep, "model": model_name, **summary})
+                print(
+                    f"{name} | {rep} | {model_name}: accuracy {summary['accuracy']:.3f} "
+                    f"| macro-F1 {summary['macro_f1']:.3f} "
+                    f"| precision {summary['precision']:.3f} | recall {summary['recall']:.3f}"
+                )
+
+    metrics = pd.DataFrame(results)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    metrics.round(4).to_csv(RESULTS_DIR / "metrics.csv", index=False)
+    save_configuration(wind_threshold, warmup_end)
+    print("\nSaved: metrics.csv and configurations.csv")
 
     for city in (CITY_A, CITY_B):
         df = city_frames[city["name"]]

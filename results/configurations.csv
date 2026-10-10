@@ -1,0 +1,28 @@
+parameter,value
+assignment,PA30 (T6)
+city_a,Viana do Castelo
+city_b,Guarda
+period,2024-01-01 to 2025-12-31
+timezone,Europe/Lisbon
+warmup_fraction,0.25
+warmup_end,2024-07-01 17:00:00
+rain_threshold_mm,0.1
+wind_quantile,0.8
+wind_threshold_kmh,21.6
+window_short_h,6
+window_long_h,24
+random_seed,42
+hoeffding_grace_period,50
+hoeffding_delta,0.001
+hoeffding_tau,0.1
+ensemble_size,5
+ensemble_grace_period,30
+ensemble_delta,0.001
+ensemble_tau,0.1
+python,3.13.3
+river_version,0.26.1
+scikit-learn_version,1.7.0
+pandas_version,2.2.3
+numpy_version,2.2.6
+matplotlib_version,3.10.3
+requests_version,2.32.4
