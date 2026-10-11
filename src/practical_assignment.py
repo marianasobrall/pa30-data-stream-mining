@@ -8,6 +8,8 @@ Business Scenario: Seasonal Outdoor Fair
 from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Sequence
+import matplotlib
+matplotlib.use("Agg", force=True)
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import json
@@ -331,6 +333,32 @@ def plot_rolling_behaviour(
         ax.tick_params(axis="x", labelbottom=True, labelrotation=90, labelsize=7)
     return _save_figure(figures_dir / f"{slugify(city)}_rolling_behaviour.png")
 
+
+def adverse_episode_durations(df: pd.DataFrame) -> pd.Series:
+    """Length of each run of consecutive T6 hours (y = 1)."""
+    run_id = (df["y"] != df["y"].shift()).cumsum()
+    runs = df.groupby(run_id)["y"].agg(["first", "size"])
+    return runs.loc[runs["first"] == 1, "size"]
+
+
+def plot_episode_durations(df: pd.DataFrame, figures_dir: Path = FIGURES_DIR) -> Path:
+    """Plot the distribution of adverse-episode durations for one city."""
+    city = df["city"].iloc[0]
+    durations = adverse_episode_durations(df)
+    print(f"\nAdverse episodes - {city}")
+    print(
+        f"  Episodes: {len(durations):,} | mean {durations.mean():.1f} h "
+        f"| median {durations.median():.0f} h | longest {durations.max()} h"
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.hist(durations, bins=range(1, int(durations.max()) + 2))
+    ax.set_xlabel("Episode duration (consecutive hours with T6 = 1)")
+    ax.set_ylabel("Number of episodes")
+    ax.set_title(f"{city} - duration of adverse episodes")
+    ax.grid(alpha=0.2)
+    return _save_figure(figures_dir / f"{slugify(city)}_episode_durations.png")
+
 #---------------------------------------
 #5. Warm-up and target T6
 
@@ -592,7 +620,50 @@ def save_configuration(wind_threshold: float, warmup_end: pd.Timestamp, results_
     )
 
 
+#----------------------------------------------
+# 9. Results figures 
 
+def plot_model_comparison(metrics: pd.DataFrame, city: str, figures_dir: Path = FIGURES_DIR) -> Path:
+    """Macro-F1 and event-class recall of the five models, Representation A vs B."""
+    data = metrics[metrics["city"] == city]
+    models = list(make_models())
+    x = np.arange(len(models), dtype=float)
+    width = 0.38
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
+    for ax, (column, label) in zip(axes, (("macro_f1", "Macro-F1"), ("recall", "Recall (event class)"))):
+        for offset, rep in ((-width / 2, "A"), (width / 2, "B")):
+            values = data[data["representation"] == rep].set_index("model").loc[models, column]
+            ax.bar(x + offset, values.values, width, label=f"Representation {rep}")
+        ax.set_xticks(x)
+        ax.set_xticklabels(models, rotation=20, ha="right")
+        ax.set_title(label)
+        ax.set_ylim(0.0, 1.02)
+        ax.grid(axis="y", alpha=0.2)
+    axes[0].set_ylabel("Score")
+    axes[0].legend(loc="best")
+    fig.suptitle(f"{city} - predictive comparison under one common protocol")
+    return _save_figure(figures_dir / f"{slugify(city)}_model_comparison.png")
+
+
+def plot_processing_cost(metrics: pd.DataFrame, figures_dir: Path = FIGURES_DIR) -> Path:
+    """Prediction and update cost per event (mean over cities and representations)."""
+    models = list(make_models())
+    cost = metrics.groupby("model")[["prediction_ms/event", "update_ms/event"]].mean().loc[models]
+    x = np.arange(len(models), dtype=float)
+    width = 0.38
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    ax.bar(x - width / 2, cost["prediction_ms/event"], width, label="Prediction ms/event")
+    ax.bar(x + width / 2, cost["update_ms/event"], width, label="Update ms/event")
+    ax.set_yscale("log")
+    ax.set_xticks(x)
+    ax.set_xticklabels(models, rotation=20, ha="right")
+    ax.set_ylabel("Milliseconds per event (log scale)")
+    ax.set_title("Computational cost per event - environment dependent")
+    ax.legend(loc="best")
+    ax.grid(axis="y", alpha=0.2)
+    return _save_figure(figures_dir / "processing_cost.png")
 
 
 
@@ -677,12 +748,23 @@ def main() -> None:
     save_configuration(wind_threshold, warmup_end)
     print("\nSaved: metrics.csv and configurations.csv")
 
+    for city_name in (CITY_A["name"], CITY_B["name"]):
+        path = plot_model_comparison(metrics, city_name)
+        print(f"Figure saved: {path.name}")
+        print(f"Figure saved: {plot_processing_cost(metrics).name}")
+
     for city in (CITY_A, CITY_B):
         df = city_frames[city["name"]]
         summarise_city(df)
         for feature in ("wind_speed_10m", "precipitation"):
             print(f"\nTop 5 hourly values - {city['name']} - {feature}")
             print(top_extremes(df, feature).to_string(index=False))
+            figures = [
+            plot_temporal_profile(df),
+            plot_hourly_profile(df),
+            plot_rolling_behaviour(df),
+            plot_episode_durations(df),
+        ]
 
         figures = [
             plot_temporal_profile(df),
