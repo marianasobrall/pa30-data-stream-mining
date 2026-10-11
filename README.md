@@ -1,1 +1,20 @@
-# pa30-data-stream-mining
+# PA30 - Data Stream Mining, Practical Assignment I
+
+- Assignment code: PA30
+- Students: Mariana Sobral (20260489), Guilherme Real (20260491)
+- City A / City B: Viana do Castelo / Guarda
+- Business scenario: Seasonal Outdoor Fair Operator
+- Target: T6 (rain >= 0.1 mm or strong wind)
+- Historical period: 2024-01-01 to 2025-12-31
+- Python version: 3.13.3
+- Package versions: see requirements.txt
+- Random seed: 42
+
+Warm-up: first 25% of the timestamps, shared by both cities. Strong wind threshold: 0.80 quantile of the pooled warm-up (21.60 km/h), frozen before evaluation.
+
+## How to reproduce
+    pip install -r requirements.txt
+    python src/practical_assignment.py
+
+Raw Open-Meteo data is in `data/raw/` and reused if present. 
+Results (`metrics.csv`, `configurations.csv`) and figures are written to `results/`.
