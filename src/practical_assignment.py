@@ -43,7 +43,7 @@ FEATURES = [
     "wind_speed_10m",
 ]
 
-# target T6: (T1 or T5)strong rain or strong wind
+#target T6 = T1 (rain) OR T5 (strong wind)
 RAIN_THRESHOLD_MM = 0.1   # T1: y = 1 if precipitation >= 0.1 mm
 WIND_QUANTILE = 0.80      # T5: threshold = 0.80 quantile of wind in the pooled warm-up
 
@@ -665,24 +665,32 @@ def plot_processing_cost(metrics: pd.DataFrame, figures_dir: Path = FIGURES_DIR)
     ax.grid(axis="y", alpha=0.2)
     return _save_figure(figures_dir / "processing_cost.png")
 
+def save_target_frequency(city_frames: dict[str, pd.DataFrame], warmup_end: pd.Timestamp) -> None:
+    """Save the share of rain, strong wind and T6 hours per city and period."""
+    rows = []
+    for city, df in city_frames.items():
+        in_warmup = df["timestamp"] <= warmup_end
+        for period, mask in (("warm-up", in_warmup), ("evaluation", ~in_warmup)):
+            part = df[mask]
+            rows.append({
+                "city": city,
+                "period": period,
+                "hours": len(part),
+                "rain_share": part["rain_event"].mean(),
+                "strong_wind_share": part["wind_event"].mean(),
+                "t6_share": part["y"].mean(),
+            })
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).round(4).to_csv(RESULTS_DIR / "target_frequency.csv", index=False)
 
+#----------------------------------------------
+# 10. Main experiment
 
-
-
-
-
-
-
-
-
-
-
-
-
-#main function
-def main() -> None:
+def run_all_experiments() -> None:
+    """Run the experiment, from raw data to results and figures."""
     ensure_output_directories()
 
+    # 1- data: load, prepare and check both cities
     city_frames: dict[str, pd.DataFrame] = {}
     for city in (CITY_A, CITY_B):
         raw_path, payload = load_city_payload(city)
@@ -699,8 +707,8 @@ def main() -> None:
     )
     print(f"\nBoth cities share the same timestamps: {same_timestamps}")
 
+    # 2- warm-up, wind threshold and target T6
     warmup_end = get_warmup_end(city_frames, WARMUP_FRACTION)
-    # threshold from the pooled warm-up only, then frozen
     wind_threshold = compute_wind_threshold(city_frames, warmup_end, WIND_QUANTILE)
     print(f"Warm-up ends at: {warmup_end}")
     print(f"Wind threshold (frozen, quantile {WIND_QUANTILE}): {wind_threshold:.2f} km/h")
@@ -708,7 +716,9 @@ def main() -> None:
     for name in city_frames:
         city_frames[name] = add_target_t6(city_frames[name], wind_threshold)
         report_target_frequency(city_frames[name], warmup_end)
+    save_target_frequency(city_frames, warmup_end)
 
+    # 3- features A and B (past info only)
     model_frames: dict[str, pd.DataFrame] = {}
     for name in city_frames:
         featured = add_features(city_frames[name])
@@ -720,6 +730,7 @@ def main() -> None:
             f"({len(featured) - len(model_frames[name])} initial rows dropped)"
         )
 
+    # 4- prequential evaluation: one stream per city and representation
     representations = {"A": FEATURES_A, "B": FEATURES_B}
     results = []
     for name, frame in model_frames.items():
@@ -746,33 +757,51 @@ def main() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     metrics.round(4).to_csv(RESULTS_DIR / "metrics.csv", index=False)
     save_configuration(wind_threshold, warmup_end)
-    print("\nSaved: metrics.csv and configurations.csv")
+    print("\nSaved: metrics.csv, configurations.csv and target_frequency.csv")
 
+    # 5- results figures
     for city_name in (CITY_A["name"], CITY_B["name"]):
         path = plot_model_comparison(metrics, city_name)
         print(f"Figure saved: {path.name}")
-        print(f"Figure saved: {plot_processing_cost(metrics).name}")
+    print(f"Figure saved: {plot_processing_cost(metrics).name}")
 
+    # 6- stream profile of each city 
     for city in (CITY_A, CITY_B):
         df = city_frames[city["name"]]
         summarise_city(df)
         for feature in ("wind_speed_10m", "precipitation"):
             print(f"\nTop 5 hourly values - {city['name']} - {feature}")
             print(top_extremes(df, feature).to_string(index=False))
-            figures = [
-            plot_temporal_profile(df),
-            plot_hourly_profile(df),
-            plot_rolling_behaviour(df),
-            plot_episode_durations(df),
-        ]
 
         figures = [
             plot_temporal_profile(df),
             plot_hourly_profile(df),
             plot_rolling_behaviour(df),
+            plot_episode_durations(df),
         ]
         print(f"  Figures saved: {', '.join(path.name for path in figures)}")
 
 
+def main() -> None:
+    np.random.seed(RANDOM_SEED)
+    print("PA30 - Business-Oriented Data Stream Mining")
+    print(
+        f"Python {sys.version.split()[0]} | river {package_version('river')} "
+        f"| scikit-learn {package_version('scikit-learn')}"
+    )
+    run_all_experiments()
+
+
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
