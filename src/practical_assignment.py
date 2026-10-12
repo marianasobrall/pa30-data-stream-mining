@@ -218,7 +218,7 @@ def check_data_quality(df: pd.DataFrame, features: Sequence[str]) -> None:
 #------------------------------------
 # 4. Stream profile for both cities
 
-# 7 day rolling window - make the hourly series readable
+# 7 day window to make the hourly series readable
 ROLLING_WINDOW_HOURS = 24 * 7
 
 def _save_figure(path: Path) -> Path:
@@ -291,7 +291,7 @@ def plot_hourly_profile(df: pd.DataFrame, figures_dir: Path = FIGURES_DIR) -> Pa
     city = df["city"].iloc[0]
     hours = df["timestamp"].dt.hour
 
-    #group the hours into 24 groups and calculate the share of hours with rain and the mean wind speed
+    # group the hours into 24 groups and calculate the share of hours with rain and the mean wind speed
     rain_share = (df["precipitation"] >= RAIN_THRESHOLD_MM).groupby(hours).mean()
     wind_mean = df["wind_speed_10m"].groupby(hours).mean()
 
@@ -472,7 +472,6 @@ def transform_events(events: Sequence[dict], scaler: MinMaxScaler, feature_names
         for e, row in zip(events, Xt)
     ]
 
-
 def _river_base_tree() -> tree.HoeffdingTreeClassifier:
     return tree.HoeffdingTreeClassifier(
         grace_period=ENSEMBLE_GRACE_PERIOD,
@@ -480,7 +479,6 @@ def _river_base_tree() -> tree.HoeffdingTreeClassifier:
         tau=ENSEMBLE_TAU,
         leaf_prediction="mc",
     )
-
 
 def make_models(seed: int = RANDOM_SEED) -> dict:
     return {
@@ -567,11 +565,11 @@ def run_prequential(events, model) -> dict:
     prediction_seconds = update_seconds = 0.0
     for event in events:
         t0 = time.perf_counter()
-        y_pred = model.predict_one(event["x"])            # 1) PREDICT
+        y_pred = model.predict_one(event["x"])            # 1- predict
         prediction_seconds += time.perf_counter() - t0
-        evaluator.update(event["y"], y_pred)              # 2) EVALUATE BEFORE LEARN
+        evaluator.update(event["y"], y_pred)              # 2- evaluate
         t1 = time.perf_counter()
-        model.learn_one(event["x"], event["y"])           # 3) LEARN
+        model.learn_one(event["x"], event["y"])           # 3- learn
         update_seconds += time.perf_counter() - t1
     summary = evaluator.summary()
     n_events = max(1, len(events))
@@ -619,7 +617,6 @@ def save_configuration(wind_threshold: float, warmup_end: pd.Timestamp, results_
         results_dir / "configurations.csv", index=False
     )
 
-
 #----------------------------------------------
 # 9. Results figures 
 
@@ -664,6 +661,29 @@ def plot_processing_cost(metrics: pd.DataFrame, figures_dir: Path = FIGURES_DIR)
     ax.legend(loc="best")
     ax.grid(axis="y", alpha=0.2)
     return _save_figure(figures_dir / "processing_cost.png")
+
+def plot_monthly_t6_risk(city_frames: dict[str, pd.DataFrame], figures_dir: Path = FIGURES_DIR) -> Path:
+    """Original visualization 1: Monthly adverse event (T6) rate comparison between cities."""
+    fig, ax = plt.subplots(figsize=(11, 5))
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    x = np.arange(1, 13)
+    width = 0.38
+    colors = {CITY_A["name"]: "#1f77b4", CITY_B["name"]: "#ff7f0e"}
+
+    for offset, (city_name, df) in zip((-width / 2, width / 2), city_frames.items()):
+        monthly_rates = df.groupby(df["timestamp"].dt.month)["y"].mean()
+        rates = [monthly_rates.get(m, 0.0) * 100 for m in x]
+        ax.bar(x + offset, rates, width, label=city_name, color=colors.get(city_name, None))
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(months)
+    ax.set_ylabel("Hours with adverse event T6 (%)")
+    ax.set_xlabel("Month of the Year")
+    ax.set_title("Monthly Comparison of Operational Meteorological Risk (T6) - Seasonal Fair")
+    ax.grid(axis="y", alpha=0.3, linestyle="--")
+    ax.legend(loc="upper right")
+    return _save_figure(figures_dir / "comparative_monthly_risk.png")
+
 
 def save_target_frequency(city_frames: dict[str, pd.DataFrame], warmup_end: pd.Timestamp) -> None:
     """Save the share of rain, strong wind and T6 hours per city and period."""
@@ -765,6 +785,9 @@ def run_all_experiments() -> None:
         print(f"Figure saved: {path.name}")
     print(f"Figure saved: {plot_processing_cost(metrics).name}")
 
+    # original visualizations for the assignment
+    print(f"Figure saved: {plot_monthly_t6_risk(city_frames).name}")
+
     # 6- stream profile of each city 
     for city in (CITY_A, CITY_B):
         df = city_frames[city["name"]]
@@ -784,7 +807,7 @@ def run_all_experiments() -> None:
 
 def main() -> None:
     np.random.seed(RANDOM_SEED)
-    print("PA30 - Business-Oriented Data Stream Mining")
+    print("Practical Assignment 1 - PA30 Data Stream Mining")
     print(
         f"Python {sys.version.split()[0]} | river {package_version('river')} "
         f"| scikit-learn {package_version('scikit-learn')}"
@@ -794,14 +817,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
