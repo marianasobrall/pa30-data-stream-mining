@@ -684,6 +684,28 @@ def plot_monthly_t6_risk(city_frames: dict[str, pd.DataFrame], figures_dir: Path
     ax.legend(loc="upper right")
     return _save_figure(figures_dir / "comparative_monthly_risk.png")
 
+def save_monthly_t6_risk(city_frames: dict[str, pd.DataFrame], results_dir: Path = RESULTS_DIR) -> pd.DataFrame:
+    """Save and print the monthly T6 rate (%) per city: the numbers behind the monthly risk figure."""
+    table = pd.DataFrame(
+        {
+            city_name: df.groupby(df["timestamp"].dt.month)["y"].mean().mul(100).round(1)
+            for city_name, df in city_frames.items()
+        }
+    )
+    table.index.name = "month"
+    table.to_csv(Path(results_dir) / "monthly_t6_risk.csv")
+
+    print("\nMonthly T6 risk (%)")
+    print(table.to_string())
+    for city_name in table.columns:
+        low, high = table[city_name].idxmin(), table[city_name].idxmax()
+        print(
+            f"  {city_name}: lowest month {low} ({table[city_name].min():.1f}%) | "
+            f"highest month {high} ({table[city_name].max():.1f}%)"
+        )
+    return table
+
+
 
 def save_target_frequency(city_frames: dict[str, pd.DataFrame], warmup_end: pd.Timestamp) -> None:
     """Save the share of rain, strong wind and T6 hours per city and period."""
@@ -785,8 +807,12 @@ def run_all_experiments() -> None:
         print(f"Figure saved: {path.name}")
     print(f"Figure saved: {plot_processing_cost(metrics).name}")
 
+
+
     # original visualizations for the assignment
     print(f"Figure saved: {plot_monthly_t6_risk(city_frames).name}")
+    print(f"Figure saved: {plot_monthly_t6_risk(city_frames).name}")
+    save_monthly_t6_risk(city_frames)
 
     # 6- stream profile of each city 
     for city in (CITY_A, CITY_B):
