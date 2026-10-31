@@ -810,6 +810,11 @@ def run_all_experiments() -> None:
         path = plot_model_comparison(metrics, city_name)
         print(f"Figure saved: {path.name}")
     print(f"Figure saved: {plot_processing_cost(metrics).name}")
+
+
+
+    # original visualizations for the assignment
+    print(f"Figure saved: {plot_monthly_t6_risk(city_frames).name}")
     save_monthly_t6_risk(city_frames)
 
     # 6- stream profile of each city 
