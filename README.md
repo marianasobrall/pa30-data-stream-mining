@@ -31,3 +31,4 @@ Results (`metrics.csv`, `configurations.csv`) and figures are written to `result
 | model_evidence_cityB.png | guarda_model_comparison.png |
 
 Reported metrics and timings come from `results/metrics.csv` (single run, seed 42).
+
