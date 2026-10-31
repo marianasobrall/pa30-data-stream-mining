@@ -429,11 +429,15 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def verify_features(df: pd.DataFrame, i: int = 100) -> None:
-    past = df["temperature_2m"].iloc[i - WINDOW_SHORT : i]
-    assert df["temperature_2m_lag1"].iloc[i] == df["temperature_2m"].iloc[i - 1]
-    assert abs(df["temperature_mean_6h"].iloc[i] - past.mean()) < 1e-9
+    """Recompute the features of one row from earlier hours only and check they match."""
+    temperature = df["temperature_2m"]
+    wind = df["wind_speed_10m"]
+    for feature in FEATURES:
+        assert df[f"{feature}_lag1"].iloc[i] == df[feature].iloc[i - 1]
+    assert abs(df["temperature_delta"].iloc[i] - (temperature.iloc[i - 1] - temperature.iloc[i - 2])) < 1e-9
+    assert abs(df["temperature_mean_6h"].iloc[i] - temperature.iloc[i - WINDOW_SHORT : i].mean()) < 1e-9
+    assert abs(df["wind_std_6h"].iloc[i] - wind.iloc[i - WINDOW_SHORT : i].std()) < 1e-9
     assert df["rain_hours_24h"].iloc[i] == df["rain_event"].iloc[i - WINDOW_LONG : i].sum()
-
 #---------------------------------
 #7. Models
 
@@ -810,7 +814,6 @@ def run_all_experiments() -> None:
 
 
     # original visualizations for the assignment
-    print(f"Figure saved: {plot_monthly_t6_risk(city_frames).name}")
     print(f"Figure saved: {plot_monthly_t6_risk(city_frames).name}")
     save_monthly_t6_risk(city_frames)
 
